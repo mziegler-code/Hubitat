@@ -1,0 +1,205 @@
+definition(
+    name: "Hydro Winter Peak Events Manager",
+    namespace: "Hydro",
+    author: "MZiegler",
+    description: "Gère les commutateurs en fonction des événements de pointe définis par Hydro-Québec pour la saison hivernale.",
+    category: "Convenience",
+    iconUrl: "",
+    iconX2Url: "",
+    iconX3Url: ""
+)
+
+preferences {
+    page(name: "mainPage", title: "", install: true, uninstall: true)
+}
+
+def mainPage() {
+    dynamicPage(name: "mainPage") {
+        section {
+            input(name: "morningSwitches", type: "capability.switch", title: "Commutateurs pour les événements AM", multiple: true, required: false)
+            input(name: "eveningSwitches", type: "capability.switch", title: "Commutateurs pour les événements PM", multiple: true, required: false)
+            input(name: "preheatHours", type: "number", title: "Heures avant pour le préchauffage", defaultValue: 0, required: true)
+            input(name: "apiUrl", type: "text", title: "URL de l'API Hydro", defaultValue: "https://donnees.solutions.hydroquebec.com/donnees-ouvertes/data/json/pointeshivernales.json", required: true)
+            input(name: "manualRefresh", type: "bool", title: "Activer le bouton de rafraîchissement manuel", defaultValue: true)
+            input(name: "notificationDevice", type: "capability.notification", title: "Sélectionner l'appareil pour les notifications", multiple: false, required: false)
+        }
+        if (settings.manualRefresh) {
+            section {
+                paragraph "Cliquez sur le bouton ci-dessous pour rafraîchir les données de l'API manuellement."
+                input(name: "refreshButton", type: "button", title: "Rafraîchir les données de l'API")
+            }
+        }
+    }
+}
+
+def sendNotification(message) {
+    log.info "Notification : ${message}"
+
+    if (settings.notificationDevice) {
+        String desc = "Notification: ${message}"
+        log.info "${desc}"
+        settings.notificationDevice.deviceNotification(desc)
+    } else {
+        log.warn "Aucun appareil de notification sélectionné."
+    }
+}
+
+def scheduleCheck() {
+    log.info "Planification de la récupération des données à 21:00 et 13:00."
+
+    def time21 = new Date().clearTime()
+    time21.setHours(21)
+    time21.setMinutes(0)
+    time21.setSeconds(0)
+    runOnce(time21, fetchAPIData)
+
+    def time13 = new Date().clearTime()
+    time13.setHours(13)
+    time13.setMinutes(0)
+    time13.setSeconds(0)
+    runOnce(time13, fetchAPIData)
+}
+
+def fetchAPIData() {
+    log.info "Récupération des données depuis l'API Hydro..."
+    def params = [
+        uri: settings.apiUrl,
+        contentType: "application/json"
+    ]
+    try {
+        httpGet(params) { response ->
+            if (response.status == 200 && response.data) {
+                log.info "Données de l'API reçues avec succès."
+                log.debug "Données brutes reçues de l'API : ${response.data}"
+                processAPIResponse(response.data)
+            } else {
+                log.error "Erreur lors de la récupération des données API : ${response.status}"
+            }
+        }
+    } catch (Exception e) {
+        log.error "Erreur : ${e.message}"
+    }
+}
+
+def processAPIResponse(data) {
+    def today = new Date()
+    def events = data?.evenements ?: []
+
+    if (events.isEmpty()) {
+        log.warn "Aucun événement dans les données API."
+        return
+    }
+
+    def filteredEvents = events.findAll { event ->
+        def eventStart = parseDateTime(event.dateDebut)
+        eventStart >= today && event.secteurClient == "Residentiel"
+    }
+
+    log.debug "Événements API filtrés : ${filteredEvents}"
+
+    if (filteredEvents.isEmpty()) {
+        log.info "Aucun événement pertinent trouvé."
+        return
+    }
+
+    def sortedEvents = filteredEvents.sort { parseDateTime(it.dateDebut) }
+    def nextEvent = sortedEvents.find { parseDateTime(it.dateDebut) > new Date() }
+
+    if (!nextEvent) {
+        log.info "Aucun événement à venir."
+        return
+    }
+
+    // Générer un ID unique si l'API n'en fournit pas
+    nextEvent.id = nextEvent.id ?: "${nextEvent.dateDebut}-${nextEvent.dateFin}-${nextEvent.plageHoraire}"
+
+    if (nextEvent.id == state.lastEventId) {
+        log.info "Événement déjà traité : ${nextEvent.id}. Ignoré."
+        return
+    }
+
+    state.lastEventId = nextEvent.id
+    log.info "Prochain événement trouvé : ${nextEvent}"
+
+    def startTime = parseDateTime(nextEvent.dateDebut)
+    def endTime = parseDateTime(nextEvent.dateFin)
+    def preheatTime = new Date(startTime.time - (settings.preheatHours * 3600000))
+
+    if (preheatTime.before(new Date())) {
+        log.warn "L'heure de préchauffage est déjà passée : ${preheatTime}."
+        return
+    }
+
+    scheduleSwitchActions(
+        nextEvent.plageHoraire == "AM" ? morningSwitches : eveningSwitches,
+        startTime,
+        endTime,
+        nextEvent.plageHoraire
+    )
+}
+
+def scheduleSwitchActions(switches, startTime, endTime, period) {
+    def preheatTime = new Date(startTime.time - (settings.preheatHours * 3600000))
+    log.info "Pré-chauffage planifié à : ${preheatTime}"
+
+    if (period == "AM") {
+        sendNotification("Pré-chauffage planifié pour le matin à : ${preheatTime}")
+    } else {
+        sendNotification("Pré-chauffage planifié pour le soir à : ${preheatTime}")
+    }
+
+    if (preheatTime.hours < 12) {
+        log.info "Activation des commutateurs du matin."
+        runOnce(preheatTime, "turnOnMorningSwitches", [data: [switches: switches]])
+    } else {
+        log.info "Activation des commutateurs du soir."
+        runOnce(preheatTime, "turnOnEveningSwitches", [data: [switches: switches]])
+    }
+
+    runOnce(endTime, "turnOffSwitches", [data: [switches: switches]])
+}
+
+def turnOnMorningSwitches(data) {
+    def switches = data.switches
+    morningSwitches.each { it.on() }
+    log.info "Commutateurs matin activés : ${morningSwitches}"
+}
+
+def turnOnEveningSwitches(data) {
+    def switches = data.switches
+    eveningSwitches.each { it.on() }
+    log.info "Commutateurs soir activés : ${eveningSwitches}"
+}
+
+def turnOffSwitches(data) {
+    def switches = data.switches
+    switches.each { it.off() }
+    log.info "Commutateurs désactivés : ${switches}"
+}
+
+def appButtonHandler(buttonName) {
+    if (buttonName == "refreshButton") {
+        log.info "Rafraîchissement manuel des données via le bouton."
+        fetchAPIData()
+    }
+}
+
+def parseDateTime(dateStr) {
+    try {
+        return Date.parse("yyyy-MM-dd'T'HH:mm:ss", dateStr)
+    } catch (Exception e) {
+        log.error "Erreur lors du parsing de la date: ${e.message}"
+        return null
+    }
+}
+
+def installed() {
+    log.info "L'application est installée."
+    state.lastEventId = null
+    scheduleCheck()
+}
+
+def updated() {
+    log.info "L'application a été mise à jour."
+    scheduleCheck()
+}
