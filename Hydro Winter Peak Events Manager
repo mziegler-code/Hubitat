@@ -156,7 +156,7 @@ def scheduleSwitchActions(switches, startTime, endTime, period) {
         runOnce(preheatTime, "turnOnEveningSwitches", [data: [switches: switches]])
     }
 
-    runOnce(endTime, "turnOffSwitches", [data: [switches: switches]])
+    runOnce(endTime, "turnOffSwitches")
 }
 
 def turnOnMorningSwitches(data) {
@@ -171,10 +171,26 @@ def turnOnEveningSwitches(data) {
     log.info "Commutateurs soir activés : ${eveningSwitches}"
 }
 
-def turnOffSwitches(data) {
-    def switches = data.switches
-    switches.each { it.off() }
-    log.info "Commutateurs désactivés : ${switches}"
+def turnOffSwitches() {
+    log.info "Désactivation des commutateurs matin et soir."
+
+    if (morningSwitches) {
+        morningSwitches.each { 
+            it.off() 
+            log.info "Commutateur matin désactivé : ${it.displayName}"
+        }
+    } else {
+        log.warn "Aucun commutateur matin configuré."
+    }
+
+    if (eveningSwitches) {
+        eveningSwitches.each { 
+            it.off() 
+            log.info "Commutateur soir désactivé : ${it.displayName}"
+        }
+    } else {
+        log.warn "Aucun commutateur soir configuré."
+    }
 }
 
 def appButtonHandler(buttonName) {
