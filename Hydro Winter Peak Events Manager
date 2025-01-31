@@ -21,7 +21,8 @@ def mainPage() {
             input(name: "preheatHours", type: "number", title: "Heures avant pour le préchauffage", defaultValue: 0, required: true)
             input(name: "apiUrl", type: "text", title: "URL de l'API Hydro", defaultValue: "https://donnees.solutions.hydroquebec.com/donnees-ouvertes/data/json/pointeshivernales.json", required: true)
             input(name: "manualRefresh", type: "bool", title: "Activer le bouton de rafraîchissement manuel", defaultValue: true)
-            input(name: "notificationDevice", type: "capability.notification", title: "Sélectionner l'appareil pour les notifications", multiple: false, required: false)
+            input(name: "notificationDevices", type: "capability.notification", title: "Sélectionner les appareils pour les notifications", multiple: true, required: false)
+
         }
         if (settings.manualRefresh) {
             section {
@@ -35,10 +36,14 @@ def mainPage() {
 def sendNotification(message) {
     log.info "Notification : ${message}"
 
-    if (settings.notificationDevice) {
+    if (settings.notificationDevices) {
         String desc = "Notification: ${message}"
-        log.info "${desc}"
-        settings.notificationDevice.deviceNotification(desc)
+        log.info "Envoi aux appareils sélectionnés."
+
+        settings.notificationDevices.each { device ->
+            device.deviceNotification(desc)
+            log.info "Notification envoyée à : ${device.displayName}"
+        }
     } else {
         log.warn "Aucun appareil de notification sélectionné."
     }
